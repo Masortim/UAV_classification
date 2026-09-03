@@ -39,6 +39,188 @@ def _apply_transparent_bg(fig):
     )
     return fig
 
+
+# ==================== АНАЛИЗ ПЕРЕСЕЧЕНИЙ КАТЕГОРИЙ (Venn) ====================
+
+def _plural_models(n: int) -> str:
+    """Русское склонение слова «модель» по числу."""
+    n = abs(int(n))
+    if 11 <= n % 100 <= 14:
+        return "моделей"
+    last = n % 10
+    if last == 1:
+        return "модель"
+    if last in (2, 3, 4):
+        return "модели"
+    return "моделей"
+
+
+def compute_category_overlap(df_ops_f: 'pd.DataFrame', total_models: int,
+                             cat_col: str = 'operation_category') -> Optional[Dict[str, Any]]:
+    """Разложение множества моделей по категориям операций на непересекающиеся группы.
+
+    Возвращает словарь со множествами model_id и счётчиками:
+      only_a  — модели ТОЛЬКО категории A (например, только мониторинг),
+      only_b  — модели ТОЛЬКО категории B (например, только уход),
+      both    — «универсалы», пригодные для обеих категорий,
+      none    — модели без привязки к операциям этих категорий.
+
+    Сумма only_a + only_b + both + none == total_models (то есть 100%),
+    в отличие от «сырых» долей по категориям, которые суммируются > 100%,
+    так как одна модель может входить сразу в несколько категорий.
+    """
+    if df_ops_f is None or df_ops_f.empty or cat_col not in df_ops_f.columns:
+        return None
+
+    sub = df_ops_f[df_ops_f[cat_col].notna()]
+    if sub.empty:
+        return None
+
+    # Порядок категорий: по числу моделей (убывание)
+    order = (sub.groupby(cat_col)['model_id'].nunique()
+                .sort_values(ascending=False))
+    cats = list(order.index)
+    if len(cats) < 2:
+        return None
+
+    # Работаем с двумя крупнейшими категориями (мониторинг / уход)
+    cat_a, cat_b = cats[0], cats[1]
+    set_a = set(sub.loc[sub[cat_col] == cat_a, 'model_id'].unique())
+    set_b = set(sub.loc[sub[cat_col] == cat_b, 'model_id'].unique())
+    both = set_a & set_b
+    only_a = set_a - set_b
+    only_b = set_b - set_a
+
+    total = int(total_models) if total_models else len(set_a | set_b)
+    none_cnt = max(total - len(set_a | set_b), 0)
+
+    def pct(n):
+        return round(n / total * 100, 1) if total else 0.0
+
+    return {
+        'cat_a': cat_a, 'cat_b': cat_b,
+        'other_cats': cats[2:],
+        'set_a': set_a, 'set_b': set_b, 'both': both,
+        'n_a': len(set_a), 'n_b': len(set_b),
+        'n_only_a': len(only_a), 'n_only_b': len(only_b), 'n_both': len(both),
+        'n_none': none_cnt,
+        'total': total,
+        'pct_a': pct(len(set_a)), 'pct_b': pct(len(set_b)),
+        'pct_only_a': pct(len(only_a)), 'pct_only_b': pct(len(only_b)),
+        'pct_both': pct(len(both)), 'pct_none': pct(none_cnt),
+        # Доля универсалов внутри каждой категории
+        'share_both_in_a': round(len(both) / len(set_a) * 100, 1) if set_a else 0.0,
+        'share_both_in_b': round(len(both) / len(set_b) * 100, 1) if set_b else 0.0,
+    }
+
+
+def build_venn_figure(ov: Dict[str, Any]) -> 'go.Figure':
+    """Диаграмма Венна (2 круга) на Plotly для пересечения категорий применения."""
+    fig = go.Figure()
+
+    # Геометрия кругов
+    r = 1.0
+    cx_a, cx_b, cy = -0.45, 0.45, 0.0
+    color_a = 'rgba(46, 134, 193, 0.45)'   # синий
+    color_b = 'rgba(231, 76, 60, 0.45)'    # красный
+
+    for cx, color, line in ((cx_a, color_a, '#2E86C1'), (cx_b, color_b, '#E74C3C')):
+        fig.add_shape(type='circle', xref='x', yref='y',
+                      x0=cx - r, y0=cy - r, x1=cx + r, y1=cy + r,
+                      fillcolor=color, line_color=line, line_width=2, layer='below')
+
+    lbl_a = str(ov['cat_a']).capitalize()
+    lbl_b = str(ov['cat_b']).capitalize()
+
+    annos = [
+        # Только A
+        (cx_a - 0.55, cy, f"<b>Только «{lbl_a}»</b><br>{ov['n_only_a']} {_plural_models(ov['n_only_a'])}<br>{ov['pct_only_a']}%", 14),
+        # Пересечение
+        (0.0, cy, f"<b>Универсалы</b><br>{ov['n_both']} {_plural_models(ov['n_both'])}<br>{ov['pct_both']}%", 14),
+        # Только B
+        (cx_b + 0.55, cy, f"<b>Только «{lbl_b}»</b><br>{ov['n_only_b']} {_plural_models(ov['n_only_b'])}<br>{ov['pct_only_b']}%", 14),
+        # Заголовки кругов
+        (cx_a - 0.35, cy + 1.15, f"<b>{lbl_a}</b><br>всего {ov['n_a']} ({ov['pct_a']}%)", 13),
+        (cx_b + 0.35, cy + 1.15, f"<b>{lbl_b}</b><br>всего {ov['n_b']} ({ov['pct_b']}%)", 13),
+    ]
+    for x, y, text, size in annos:
+        fig.add_annotation(x=x, y=y, text=text, showarrow=False,
+                           font=dict(size=size, color='#2c3e50'), align='center')
+
+    if ov['n_none'] > 0:
+        fig.add_annotation(
+            x=0.0, y=-1.55,
+            text=f"Вне обеих категорий: {ov['n_none']} {_plural_models(ov['n_none'])} ({ov['pct_none']}%)",
+            showarrow=False, font=dict(size=12, color='#7f8c8d'))
+
+    fig.update_xaxes(visible=False, range=[-2.1, 2.1],
+                     scaleanchor='y', scaleratio=1)
+    fig.update_yaxes(visible=False, range=[-1.9, 1.9])
+    fig.update_layout(
+        title=f"Диаграмма Венна: пересечение категорий применения (всего моделей: {ov['total']})",
+        height=520, margin=dict(l=20, r=20, t=70, b=40), showlegend=False)
+    return _apply_transparent_bg(fig)
+
+
+def build_exclusive_categories_df(ov: Dict[str, Any]) -> 'pd.DataFrame':
+    """Три взаимоисключающие категории (в сумме ровно 100%)."""
+    lbl_a = str(ov['cat_a']).capitalize()
+    lbl_b = str(ov['cat_b']).capitalize()
+    rows = [
+        (f'Только «{lbl_a}»', ov['n_only_a'], ov['pct_only_a']),
+        (f'Только «{lbl_b}»', ov['n_only_b'], ov['pct_only_b']),
+        ('Универсалы (обе категории)', ov['n_both'], ov['pct_both']),
+    ]
+    if ov['n_none'] > 0:
+        rows.append(('Не классифицированы', ov['n_none'], ov['pct_none']))
+    return pd.DataFrame(rows, columns=['Категория', 'Моделей', 'Доля, %'])
+
+
+def build_overlap_explanation(ov: Dict[str, Any]) -> str:
+    """Текстовое пояснение: сколько моделей каждой категории применимы и в противоположной."""
+    lbl_a = str(ov['cat_a']).capitalize()
+    lbl_b = str(ov['cat_b']).capitalize()
+    a_low, b_low = str(ov['cat_a']).lower(), str(ov['cat_b']).lower()
+    sum_raw = round(ov['pct_a'] + ov['pct_b'], 1)
+
+    txt = f"""
+**Почему доли категорий не дают в сумме 100 %**
+
+Категории применения **не являются взаимоисключающими**: одна и та же модель БПЛА может
+быть пригодна и для операций «{a_low}», и для операций «{b_low}». Поэтому такие модели
+учитываются дважды, и сумма долей ({ov['pct_a']} % + {ov['pct_b']} % = {sum_raw} %)
+превышает 100 %. «Лишние» {round(sum_raw - 100, 1) if sum_raw > 100 else 0} п.п. — это как раз
+модели-универсалы, посчитанные в обеих категориях.
+
+**Количественная расшифровка (всего моделей: {ov['total']})**
+
+- «{lbl_a}»: **{ov['n_a']}** {_plural_models(ov['n_a'])} ({ov['pct_a']} % от всех). Из них
+  **{ov['n_both']}** ({ov['share_both_in_a']} % внутри категории, {ov['pct_both']} % от всех)
+  дополнительно применимы и для операций «{b_low}».
+- «{lbl_b}»: **{ov['n_b']}** {_plural_models(ov['n_b'])} ({ov['pct_b']} % от всех). Из них
+  **{ov['n_both']}** ({ov['share_both_in_b']} % внутри категории, {ov['pct_both']} % от всех)
+  дополнительно применимы и для операций «{a_low}».
+
+**Корректное разбиение на три взаимоисключающие категории (в сумме 100 %)**
+
+1. Только «{lbl_a}» (специализированные) — **{ov['n_only_a']}** {_plural_models(ov['n_only_a'])}, **{ov['pct_only_a']} %**
+2. Только «{lbl_b}» (специализированные) — **{ov['n_only_b']}** {_plural_models(ov['n_only_b'])}, **{ov['pct_only_b']} %**
+3. **Универсалы** (пригодны для обеих категорий) — **{ov['n_both']}** {_plural_models(ov['n_both'])}, **{ov['pct_both']} %**
+"""
+    if ov['n_none'] > 0:
+        txt += (f"4. Не отнесены ни к одной из категорий (нет данных об операциях) — "
+                f"**{ov['n_none']}** {_plural_models(ov['n_none'])}, **{ov['pct_none']} %**\n")
+    total_pct = round(ov['pct_only_a'] + ov['pct_only_b'] + ov['pct_both'] + ov['pct_none'], 1)
+    txt += (f"\nИтого: {ov['n_only_a']} + {ov['n_only_b']} + {ov['n_both']}"
+            + (f" + {ov['n_none']}" if ov['n_none'] > 0 else "")
+            + f" = {ov['total']} {_plural_models(ov['total'])} ({total_pct} %).")
+    if ov['other_cats']:
+        txt += ("\n\n*Примечание: в выборке присутствуют также категории: "
+                + ", ".join(f"«{c}»" for c in ov['other_cats'])
+                + " — они не отображены на диаграмме Венна (показаны две крупнейшие).*")
+    return txt
+
+
 # ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
 logging.basicConfig(
     level=logging.INFO,
@@ -2349,6 +2531,49 @@ with tab2:
                         st.plotly_chart(fig, use_container_width=True)
                     else:
                         st.info("Нет данных об операциях")
+
+                # --- Ряд 1б: Пересечение категорий, универсалы и диаграмма Венна ---
+                total_models = df_f['model_id'].nunique()
+                _ov = compute_category_overlap(df_ops_f, total_models)
+                if _ov is not None:
+                    st.markdown("#### 🔀 Пересечение категорий применения и универсальные модели")
+                    st.warning(
+                        f"Доли по категориям суммируются в "
+                        f"{round(_ov['pct_a'] + _ov['pct_b'], 1)} %, а не в 100 %, потому что "
+                        f"{_ov['n_both']} {_plural_models(_ov['n_both'])} пригодны сразу для обеих категорий "
+                        f"и учитываются дважды. Ниже — корректное разбиение на три "
+                        f"взаимоисключающие категории."
+                    )
+
+                    v1, v2 = st.columns([3, 2])
+                    with v1:
+                        st.plotly_chart(build_venn_figure(_ov), use_container_width=True)
+                    with v2:
+                        excl = build_exclusive_categories_df(_ov)
+                        fig_excl = _apply_transparent_bg(px.pie(
+                            excl, names='Категория', values='Моделей', hole=0.45,
+                            title='Три взаимоисключающие категории (сумма = 100 %)',
+                            color_discrete_sequence=['#2E86C1', '#E74C3C', '#8E44AD', '#95A5A6']
+                        ))
+                        fig_excl.update_traces(textinfo='percent+value')
+                        fig_excl.update_layout(legend=dict(orientation='h', y=-0.15))
+                        st.plotly_chart(fig_excl, use_container_width=True)
+                        st.dataframe(excl, use_container_width=True, hide_index=True)
+
+                    st.markdown(build_overlap_explanation(_ov))
+
+                    with st.expander("📋 Список моделей-универсалов"):
+                        _uni_ids = sorted(_ov['both'])
+                        if _uni_ids:
+                            _uni_cols = [c for c in ['model_id', 'model_name', 'manufacturer_name',
+                                                     'type_name', 'max_takeoff_weight_kg']
+                                         if c in df_f.columns]
+                            st.dataframe(
+                                df_f[df_f['model_id'].isin(_uni_ids)][_uni_cols]
+                                    .drop_duplicates('model_id'),
+                                use_container_width=True, hide_index=True)
+                        else:
+                            st.info("Универсальных моделей в текущей выборке нет.")
 
                 # --- Ряд 2: Heatmap типы vs операции + Средняя продуктивность ---
                 c1, c2 = st.columns(2)
