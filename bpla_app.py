@@ -2314,10 +2314,28 @@ with tab2:
                 with c1:
                     # Уникальные модели по категориям операций
                     if 'operation_category' in df_ops_f.columns and df_ops_f['operation_category'].notna().any():
+                        total_models = df_f['model_id'].nunique()
+
+                        # Множества моделей по категориям (модель может входить в обе категории)
+                        cat_sets = (df_ops_f.dropna(subset=['operation_category'])
+                                    .groupby('operation_category')['model_id']
+                                    .apply(set).to_dict())
+                        set_mon = cat_sets.get('мониторинг', set())
+                        set_care = cat_sets.get('уход', set())
+                        both = set_mon & set_care                # универсалы
+                        only_mon = set_mon - set_care            # только мониторинг
+                        only_care = set_care - set_mon           # только уход
+                        n_mon, n_care = len(set_mon), len(set_care)
+                        n_both, n_only_mon, n_only_care = len(both), len(only_mon), len(only_care)
+                        n_none = total_models - (n_only_mon + n_only_care + n_both)
+
+                        def _pct(x):
+                            return round(x / total_models * 100, 1) if total_models else 0.0
+
+                        # --- Столбчатая диаграмма по категориям операций (как прежде) ---
                         cat_counts = df_ops_f.groupby('operation_category')['model_id'].nunique().reset_index()
                         cat_counts.columns = ['Категория', 'Моделей']
                         cat_counts = cat_counts.sort_values('Моделей', ascending=False)
-                        total_models = df_f['model_id'].nunique()
                         cat_counts['Доля, %'] = (cat_counts['Моделей'] / total_models * 100).round(1)
                         fig = _apply_transparent_bg(px.bar(
                             cat_counts, x='Категория', y='Моделей',
@@ -2328,6 +2346,58 @@ with tab2:
                         fig.update_traces(texttemplate='%{text}%', textposition='outside')
                         fig.update_layout(xaxis_tickangle=-30)
                         st.plotly_chart(fig, use_container_width=True)
+
+                        # --- Пояснение ---
+                        st.markdown(
+                            f"""
+**Пояснение к процентам.** Категории *мониторинг* и *уход за посевами* **пересекаются**:
+одна и та же модель может выполнять операции обеих категорий, поэтому сумма долей
+({_pct(n_mon)}% + {_pct(n_care)}% = {round(_pct(n_mon) + _pct(n_care), 1)}%) превышает 100% — это не ошибка,
+а следствие двойного учёта универсальных моделей.
+
+- **{n_mon} моделей из {total_models} ({_pct(n_mon)}%)** предназначены для мониторинга,
+  при этом **{n_both} из них ({_pct(n_both)}% от всех, {round(n_both / n_mon * 100, 1) if n_mon else 0}% внутри категории)**
+  могут использоваться для ухода за посевами.
+- **{n_care} моделей из {total_models} ({_pct(n_care)}%)** предназначены для ухода за посевами,
+  при этом **{n_both} из них ({_pct(n_both)}% от всех, {round(n_both / n_care * 100, 1) if n_care else 0}% внутри категории)**
+  могут использоваться для мониторинга.
+
+Взаимоисключающее разбиение (в сумме ровно 100%):
+только мониторинг — **{n_only_mon}** ({_pct(n_only_mon)}%),
+универсалы — **{n_both}** ({_pct(n_both)}%),
+только уход — **{n_only_care}** ({_pct(n_only_care)}%)""" +
+                            (f", без данных — **{n_none}** ({_pct(n_none)}%)." if n_none > 0 else ".")
+                        )
+
+                        # --- Диаграмма Венна (два круга) ---
+                        venn = go.Figure()
+                        r, cy = 1.0, 0.0
+                        cx1, cx2 = -0.55, 0.55
+                        venn.add_shape(type='circle', xref='x', yref='y',
+                                       x0=cx1 - r, y0=cy - r, x1=cx1 + r, y1=cy + r,
+                                       fillcolor='rgba(31,119,180,0.45)', line_color='rgba(31,119,180,0.9)')
+                        venn.add_shape(type='circle', xref='x', yref='y',
+                                       x0=cx2 - r, y0=cy - r, x1=cx2 + r, y1=cy + r,
+                                       fillcolor='rgba(255,127,14,0.45)', line_color='rgba(255,127,14,0.9)')
+                        venn.add_trace(go.Scatter(
+                            x=[-1.05, 0.0, 1.05, -1.05, 1.05],
+                            y=[0.05, 0.05, 0.05, 1.25, 1.25],
+                            text=[f"<b>{n_only_mon}</b><br>{_pct(n_only_mon)}%",
+                                  f"<b>{n_both}</b><br>{_pct(n_both)}%",
+                                  f"<b>{n_only_care}</b><br>{_pct(n_only_care)}%",
+                                  f"<b>Мониторинг</b><br>{n_mon} ({_pct(n_mon)}%)",
+                                  f"<b>Уход за посевами</b><br>{n_care} ({_pct(n_care)}%)"],
+                            mode='text', textfont=dict(size=13, color='#2c3e50'),
+                            hoverinfo='skip', showlegend=False
+                        ))
+                        venn.update_xaxes(visible=False, range=[-2.2, 2.2],
+                                          scaleanchor='y', scaleratio=1)
+                        venn.update_yaxes(visible=False, range=[-1.5, 1.7])
+                        venn.update_layout(
+                            title=f'Диаграмма Венна: пересечение категорий (всего моделей: {total_models})',
+                            margin=dict(l=10, r=10, t=60, b=10), height=430
+                        )
+                        st.plotly_chart(_apply_transparent_bg(venn), use_container_width=True)
                     else:
                         st.info("Нет данных о категориях операций")
 
